@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+env/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets & env (keep *.example)
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Local data & caches
+*.db
+*.sqlite
+*.sqlite3
+backend/db/watchlist.db
+backend/data/cache/
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Misc
+*.pem
+*.key
+.credentials
