@@ -41,10 +41,12 @@ cd backend
 python -m pip install -r requirements.txt
 copy .env.example .env
 # 编辑 .env，填入 MODEL_API_KEY 等（见下文「AI 配置」）
-python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 9000
 ```
 
-健康检查：<http://127.0.0.1:8000/api/health>
+健康检查：<http://127.0.0.1:9000/api/health>
+
+> 若本机 8000 被系统保留端口占用，请继续使用 **9000**。
 
 ### 2. 前端
 
@@ -57,7 +59,12 @@ npm run dev
 ```
 
 浏览器打开：<http://127.0.0.1:5173>  
-开发模式下前端将 `/api` 代理到后端 `8000` 端口。
+开发模式下前端将 `/api` 代理到后端 `9000` 端口。
+
+### 控制窗口（可选）
+
+双击仓库根目录 `control.bat`，可一键启动/停止后端与前端、打开浏览器、查看日志。  
+若默认端口被占用，会自动改用其它空闲端口。可选开启 Cloudflare 临时公网（需已安装 cloudflared）。
 
 ## AI 配置
 
@@ -91,20 +98,14 @@ MODEL_TEMPERATURE=1
 
 完整路由以 `backend/main.py` 为准。
 
-## 信号与交易计划说明（简要）
-
-- **技术评分**：按多空信号占比汇总；中性信号计入分母。各维度文案跟随该维度自身得分，而非笼统套用总评。
-- **交易计划**：倾向弱支撑附近回踩入场、更紧止损；止盈优先选择风险收益比更合理的阻力位；界面将风险归一化为「1」展示 RR。
-- **舆情**：规则引擎可叠加资讯关键词情绪；原始正文不落盘。
-
 ## 目录结构
 
 ```
 ├── backend/           # FastAPI 服务
 │   ├── main.py
-│   ├── data/          # 行情、舆情、AI、板块等
-│   ├── indicators/    # 指标、信号、支撑阻力、筛选
-│   ├── db/            # SQLite（自选 / AI 历史）
+│   ├── data/
+│   ├── indicators/
+│   ├── db/
 │   ├── .env.example
 │   └── requirements.txt
 ├── frontend/          # Vite React 前端

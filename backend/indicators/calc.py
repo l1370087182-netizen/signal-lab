@@ -20,101 +20,146 @@ def _safe_float(value: Any) -> float | None:
 
 
 def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
-    if df is None or len(df) < 30:
-        raise ValueError("历史数据不足，无法计算技术指标")
+    """Compute indicators; short IPO history yields nulls instead of hard failure."""
+    if df is None or len(df) < 2:
+        raise ValueError("暂无可用日线，无法计算技术指标")
 
     close = df["close"]
     high = df["high"]
     low = df["low"]
     volume = df["volume"]
+    n = len(df)
+    data_thin = n < 30
 
-    rsi = RSIIndicator(close=close, window=14).rsi()
-    macd_ind = MACD(close=close)
-    macd = macd_ind.macd()
-    macd_signal = macd_ind.macd_signal()
-    macd_hist = macd_ind.macd_diff()
+    def _last(series: pd.Series | None) -> float | None:
+        if series is None or len(series) == 0:
+            return None
+        return _safe_float(series.iloc[-1])
 
-    stoch = StochasticOscillator(high=high, low=low, close=close)
-    stoch_k = stoch.stoch()
-    stoch_d = stoch.stoch_signal()
+    rsi_v = macd_v = macd_sig_v = macd_hist_v = None
+    stoch_k_v = stoch_d_v = None
+    adx_v = di_pos_v = di_neg_v = None
+    cci_v = willr_v = None
+    bb_h = bb_m = bb_l = bb_p = None
+    atr_v = obv_v = None
+    ma20_v = ma50_v = ma200_v = None
+    vol_ma = None
 
-    adx_ind = ADXIndicator(high=high, low=low, close=close, window=14)
-    adx = adx_ind.adx()
-    di_pos = adx_ind.adx_pos()
-    di_neg = adx_ind.adx_neg()
-
-    cci = CCIIndicator(high=high, low=low, close=close, window=20).cci()
-    willr = WilliamsRIndicator(high=high, low=low, close=close, lbp=14).williams_r()
-
-    bb = BollingerBands(close=close, window=20, window_dev=2)
-    bb_high = bb.bollinger_hband()
-    bb_mid = bb.bollinger_mavg()
-    bb_low = bb.bollinger_lband()
-    bb_pct = bb.bollinger_pband()
-
-    atr = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
-    obv = OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
-
-    ma20 = SMAIndicator(close=close, window=20).sma_indicator()
-    ma50 = SMAIndicator(close=close, window=50).sma_indicator()
-    ma200 = SMAIndicator(close=close, window=200).sma_indicator() if len(df) >= 200 else None
-
-    vol_ma20 = volume.rolling(20).mean()
+    try:
+        if n >= 15:
+            rsi_v = _last(RSIIndicator(close=close, window=14).rsi())
+    except Exception:
+        pass
+    try:
+        if n >= 26:
+            macd_ind = MACD(close=close)
+            macd_v = _last(macd_ind.macd())
+            macd_sig_v = _last(macd_ind.macd_signal())
+            macd_hist_v = _last(macd_ind.macd_diff())
+    except Exception:
+        pass
+    try:
+        if n >= 14:
+            stoch = StochasticOscillator(high=high, low=low, close=close)
+            stoch_k_v = _last(stoch.stoch())
+            stoch_d_v = _last(stoch.stoch_signal())
+    except Exception:
+        pass
+    try:
+        if n >= 28:
+            adx_ind = ADXIndicator(high=high, low=low, close=close, window=14)
+            adx_v = _last(adx_ind.adx())
+            di_pos_v = _last(adx_ind.adx_pos())
+            di_neg_v = _last(adx_ind.adx_neg())
+    except Exception:
+        pass
+    try:
+        if n >= 20:
+            cci_v = _last(CCIIndicator(high=high, low=low, close=close, window=20).cci())
+    except Exception:
+        pass
+    try:
+        if n >= 14:
+            willr_v = _last(WilliamsRIndicator(high=high, low=low, close=close, lbp=14).williams_r())
+    except Exception:
+        pass
+    try:
+        if n >= 20:
+            bb = BollingerBands(close=close, window=20, window_dev=2)
+            bb_h = _last(bb.bollinger_hband())
+            bb_m = _last(bb.bollinger_mavg())
+            bb_l = _last(bb.bollinger_lband())
+            bb_p = _last(bb.bollinger_pband())
+    except Exception:
+        pass
+    try:
+        if n >= 15:
+            atr_v = _last(AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range())
+    except Exception:
+        pass
+    try:
+        obv_v = _last(OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume())
+    except Exception:
+        pass
+    try:
+        if n >= 20:
+            ma20_v = _last(SMAIndicator(close=close, window=20).sma_indicator())
+    except Exception:
+        pass
+    try:
+        if n >= 50:
+            ma50_v = _last(SMAIndicator(close=close, window=50).sma_indicator())
+    except Exception:
+        pass
+    try:
+        if n >= 200:
+            ma200_v = _last(SMAIndicator(close=close, window=200).sma_indicator())
+    except Exception:
+        pass
+    try:
+        if n >= 5:
+            vol_ma = _last(volume.rolling(min(20, n)).mean())
+    except Exception:
+        pass
 
     last = df.iloc[-1]
     last_close = float(last["close"])
     last_vol = float(last["volume"]) if not pd.isna(last["volume"]) else None
-    vol_ma = _safe_float(vol_ma20.iloc[-1])
     vol_ratio = (last_vol / vol_ma) if last_vol is not None and vol_ma and vol_ma > 0 else None
-
-    bb_h = _safe_float(bb_high.iloc[-1])
-    bb_m = _safe_float(bb_mid.iloc[-1])
-    bb_l = _safe_float(bb_low.iloc[-1])
-    bb_p = _safe_float(bb_pct.iloc[-1])
-
-    ma20_v = _safe_float(ma20.iloc[-1])
-    ma50_v = _safe_float(ma50.iloc[-1])
-    ma200_v = _safe_float(ma200.iloc[-1]) if ma200 is not None else None
+    if atr_v is None or atr_v <= 0:
+        # Fallback range for thin IPO series
+        try:
+            atr_v = float((high - low).tail(min(14, n)).mean()) or last_close * 0.02
+        except Exception:
+            atr_v = last_close * 0.02
 
     return {
         "price": round(last_close, 4),
-        "rsi_14": round(_safe_float(rsi.iloc[-1]) or 0, 2) if _safe_float(rsi.iloc[-1]) is not None else None,
-        "macd": round(_safe_float(macd.iloc[-1]) or 0, 4) if _safe_float(macd.iloc[-1]) is not None else None,
-        "macd_signal": round(_safe_float(macd_signal.iloc[-1]) or 0, 4)
-        if _safe_float(macd_signal.iloc[-1]) is not None
-        else None,
-        "macd_hist": round(_safe_float(macd_hist.iloc[-1]) or 0, 4)
-        if _safe_float(macd_hist.iloc[-1]) is not None
-        else None,
-        "stoch_k": round(_safe_float(stoch_k.iloc[-1]) or 0, 2)
-        if _safe_float(stoch_k.iloc[-1]) is not None
-        else None,
-        "stoch_d": round(_safe_float(stoch_d.iloc[-1]) or 0, 2)
-        if _safe_float(stoch_d.iloc[-1]) is not None
-        else None,
-        "adx": round(_safe_float(adx.iloc[-1]) or 0, 2) if _safe_float(adx.iloc[-1]) is not None else None,
-        "di_plus": round(_safe_float(di_pos.iloc[-1]) or 0, 2)
-        if _safe_float(di_pos.iloc[-1]) is not None
-        else None,
-        "di_minus": round(_safe_float(di_neg.iloc[-1]) or 0, 2)
-        if _safe_float(di_neg.iloc[-1]) is not None
-        else None,
-        "cci": round(_safe_float(cci.iloc[-1]) or 0, 2) if _safe_float(cci.iloc[-1]) is not None else None,
-        "williams_r": round(_safe_float(willr.iloc[-1]) or 0, 2)
-        if _safe_float(willr.iloc[-1]) is not None
-        else None,
+        "rsi_14": round(rsi_v, 2) if rsi_v is not None else None,
+        "macd": round(macd_v, 4) if macd_v is not None else None,
+        "macd_signal": round(macd_sig_v, 4) if macd_sig_v is not None else None,
+        "macd_hist": round(macd_hist_v, 4) if macd_hist_v is not None else None,
+        "stoch_k": round(stoch_k_v, 2) if stoch_k_v is not None else None,
+        "stoch_d": round(stoch_d_v, 2) if stoch_d_v is not None else None,
+        "adx": round(adx_v, 2) if adx_v is not None else None,
+        "di_plus": round(di_pos_v, 2) if di_pos_v is not None else None,
+        "di_minus": round(di_neg_v, 2) if di_neg_v is not None else None,
+        "cci": round(cci_v, 2) if cci_v is not None else None,
+        "williams_r": round(willr_v, 2) if willr_v is not None else None,
         "bb_upper": round(bb_h, 4) if bb_h is not None else None,
         "bb_middle": round(bb_m, 4) if bb_m is not None else None,
         "bb_lower": round(bb_l, 4) if bb_l is not None else None,
         "bb_pct": round(bb_p * 100, 2) if bb_p is not None else None,
-        "atr_14": round(_safe_float(atr.iloc[-1]) or 0, 4) if _safe_float(atr.iloc[-1]) is not None else None,
-        "obv": round(_safe_float(obv.iloc[-1]) or 0, 0) if _safe_float(obv.iloc[-1]) is not None else None,
+        "atr_14": round(atr_v, 4) if atr_v is not None else None,
+        "obv": round(obv_v, 0) if obv_v is not None else None,
         "ma20": round(ma20_v, 4) if ma20_v is not None else None,
         "ma50": round(ma50_v, 4) if ma50_v is not None else None,
         "ma200": round(ma200_v, 4) if ma200_v is not None else None,
         "volume": round(last_vol, 0) if last_vol is not None else None,
         "volume_ma20": round(vol_ma, 0) if vol_ma is not None else None,
         "volume_ratio": round(vol_ratio, 2) if vol_ratio is not None else None,
+        "history_bars": n,
+        "data_thin": data_thin,
     }
 
 

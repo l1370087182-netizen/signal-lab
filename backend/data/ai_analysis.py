@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from typing import Any, Iterator
@@ -13,12 +12,12 @@ from data.llm_client import chat_completion
 from data.news_sentiment import (
     _fetch_article_text,
     _list_eastmoney_items,
-    _list_yahoo_items,
 )
+from data.ttl_cache import TtlCache
 
-_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL = 600  # 10 min
 _CACHE_VER = "v3"  # utf-8 / sse encoding fix
+_CACHE: TtlCache[str, dict[str, Any]] = TtlCache(maxsize=64, default_ttl=_CACHE_TTL)
 
 _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]|[A-Za-z0-9$%\.\-]+")
 _SENT_SPLIT = re.compile(r"(?<=[。！？；;\n])|(?<=[.!?])\s+")
@@ -33,18 +32,12 @@ _QUERY_TERMS = (
 
 
 def _cache_get(key: str) -> dict[str, Any] | None:
-    item = _CACHE.get(key)
-    if not item:
-        return None
-    exp, val = item
-    if time.time() > exp:
-        _CACHE.pop(key, None)
-        return None
-    return dict(val)
+    val = _CACHE.get(key)
+    return dict(val) if val is not None else None
 
 
 def _cache_set(key: str, val: dict[str, Any]) -> None:
-    _CACHE[key] = (time.time() + _CACHE_TTL, dict(val))
+    _CACHE.set(key, dict(val))
 
 
 def _tokenize(text: str) -> list[str]:
@@ -159,7 +152,8 @@ def _collect_documents(
             on_progress(msg)
 
     prog("① 拉取东方财富 / Yahoo 资讯列表…")
-    items = _list_eastmoney_items(symbol, limit=8) + _list_yahoo_items(symbol, limit=5)
+    items = _list_eastmoney_items(symbol, limit=10)
+
     seen: set[str] = set()
     uniq: list[dict[str, str]] = []
     for it in items:
@@ -339,22 +333,31 @@ def _prepare_ai_analysis(
         )
 
     prog("⑧ 资料准备完成，即将调用大模型…")
+    from data.ai_context import context_stats, inject_recent_context
+
+    messages = inject_recent_context(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        symbol=symbol,
+        kind="general",
+    )
+    stats = {
+        "documents": len(real_docs),
+        "chunks": len([c for c in chunks if c.get("source") != "seed"]),
+        "retrieved": len(selected),
+        "method": "chunk+bm25+llm",
+        **context_stats(symbol, "general"),
+    }
     return {
         "cached_result": None,
         "cache_key": cache_key,
         "symbol": symbol,
         "name": name,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+        "messages": messages,
         "sources": sources[:12],
-        "stats": {
-            "documents": len(real_docs),
-            "chunks": len([c for c in chunks if c.get("source") != "seed"]),
-            "retrieved": len(selected),
-            "method": "chunk+bm25+llm",
-        },
+        "stats": stats,
         "disclaimer": "资讯由公开网页抓取并经 BM25 检索后由大模型归纳，仅供参考，不构成投资建议。",
     }
 
@@ -395,16 +398,13 @@ def run_ai_analysis(symbol: str, name: str | None = None) -> dict[str, Any]:
         return ctx["cached_result"]
     answer = chat_completion(
         ctx["messages"],
-        temperature=1.0,
         max_tokens=4096,
         continue_on_length=2,
     )
     return _finalize_ai_result(ctx, answer)
 
 
-def _sse(payload: dict[str, Any]) -> bytes:
-    # ensure_ascii=True → \uXXXX, ASCII-only wire format (avoids UTF-8 mojibake in SSE)
-    return f"data: {json.dumps(payload, ensure_ascii=True)}\n\n".encode("utf-8")
+from data.sse_utils import sse_bytes as _sse
 
 
 def _prepare_in_thread(prepare_fn: Any, *args: Any) -> Iterator[tuple[str, Any]]:
@@ -432,7 +432,8 @@ def _prepare_in_thread(prepare_fn: Any, *args: Any) -> Iterator[tuple[str, Any]]
             idle = 0
         except Empty:
             idle += 1
-            if idle in (2, 6, 12, 24):
+            # Keep heartbeats going so proxies / UI don't treat long prep as hung.
+            if idle in (2, 6, 12, 24) or (idle > 24 and idle % 20 == 0):
                 yield ("phase", f"…处理中，已等待约 {idle * 0.5:.0f}s")
             continue
         if kind == "phase":
@@ -442,6 +443,40 @@ def _prepare_in_thread(prepare_fn: Any, *args: Any) -> Iterator[tuple[str, Any]]
             return
         else:
             raise payload
+
+
+def _llm_in_thread(**kwargs: Any) -> Iterator[tuple[str, Any]]:
+    """Run chat_completion in a worker; yield heartbeats then ('ok', answer)."""
+    import threading
+    from queue import Empty, Queue
+
+    from data.llm_client import chat_completion
+
+    q: Queue = Queue()
+
+    def worker() -> None:
+        try:
+            q.put(("ok", chat_completion(**kwargs)))
+        except Exception as exc:  # noqa: BLE001
+            q.put(("err", exc))
+
+    threading.Thread(target=worker, daemon=True).start()
+    idle = 0
+    while True:
+        try:
+            kind, payload = q.get(timeout=0.5)
+        except Empty:
+            idle += 1
+            secs = idle * 0.5
+            if idle in (2, 6, 12, 24, 48, 90, 150, 240, 360, 480) or (
+                idle > 480 and idle % 60 == 0
+            ):
+                yield ("phase", f"…大模型生成中，已等待约 {secs:.0f}s")
+            continue
+        if kind == "ok":
+            yield ("ok", payload)
+            return
+        raise payload
 
 
 def iter_ai_analysis_sse(symbol: str, name: str | None = None) -> Iterator[bytes]:
@@ -461,19 +496,26 @@ def iter_ai_analysis_sse(symbol: str, name: str | None = None) -> Iterator[bytes
             yield _sse({"type": "done", "result": cached})
             return
 
-        yield _sse({"type": "phase", "text": "⑨ 正在调用大模型生成分析（可能需要数十秒）…"})
-        answer = chat_completion(
-            ctx["messages"],
+        yield _sse({"type": "phase", "text": "⑨ 正在调用大模型生成分析（可能需要 1–3 分钟）…"})
+        answer = ""
+        for kind, payload in _llm_in_thread(
+            messages=ctx["messages"],
             max_tokens=4096,
             continue_on_length=2,
-        )
+        ):
+            if kind == "phase":
+                yield _sse({"type": "phase", "text": str(payload)})
+            else:
+                answer = str(payload)
         if not answer.strip():
             raise RuntimeError("大模型未返回文本内容（可能超时或接口异常）")
         yield _sse({"type": "phase", "text": "⑩ 生成完成，正在保存…"})
         result = _finalize_ai_result(ctx, answer)
         yield _sse({"type": "done", "result": result})
     except Exception as exc:  # noqa: BLE001
-        yield _sse({"type": "error", "message": str(exc)})
+        from data.errors_zh import friendly_error
+
+        yield _sse({"type": "error", "message": friendly_error(exc)})
 
 
 def clear_ai_analysis_cache() -> None:

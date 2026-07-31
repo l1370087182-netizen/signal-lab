@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
 import { api } from '../api/client'
@@ -18,9 +18,11 @@ import AiAnalysisModal from '../components/AiAnalysisModal'
 import type { AiModalKind } from '../components/AiAnalysisModal'
 import AiHistoryModal from '../components/AiHistoryModal'
 import LevelsPanel from '../components/LevelsPanel'
+import SessionPrices from '../components/SessionPrices'
 import Sparkline from '../components/Sparkline'
 import VerdictVisual from '../components/VerdictVisual'
 import useDocumentTitle from '../hooks/useDocumentTitle'
+import useLiveQuotes, { withLivePrice } from '../hooks/useLiveQuotes'
 import { changeClass, formatPct, formatPrice } from '../utils/format'
 import {
   getFundSeenHash,
@@ -135,14 +137,26 @@ export default function Analysis() {
   const [aiOpen, setAiOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [aiKind, setAiKind] = useState<AiModalKind>('general')
+  const [forecastSide, setForecastSide] = useState<'long' | 'short'>('long')
+  const [forecastEntry, setForecastEntry] = useState<'choose' | 'position'>('choose')
   const [fundNew, setFundNew] = useState(false)
   const [disclaimer, setDisclaimer] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
+  const liveSymbols = useMemo(
+    () => (quote?.symbol ? [quote.symbol] : symbol ? [symbol.toUpperCase()] : []),
+    [quote?.symbol, symbol],
+  )
+  const liveQuotes = useLiveQuotes(liveSymbols, {
+    enabled: Boolean(quote) && !loading,
+    intervalMs: 3000,
+  })
+  const liveQuote = quote ? withLivePrice(quote, liveQuotes) : null
+
   useDocumentTitle(
-    quote?.symbol
-      ? `${quote.symbol}${quote.name ? ` · ${quote.name}` : ''} · 详细分析`
+    liveQuote?.symbol
+      ? `${liveQuote.symbol}${liveQuote.name ? ` · ${liveQuote.name}` : ''} · 详细分析`
       : `${symbol.toUpperCase()} · 详细分析`,
   )
 
@@ -210,11 +224,8 @@ export default function Analysis() {
   if (error) {
     return (
       <div className="page">
-        <Link to={`/stock/${symbol}`} className="back">
-          ← 返回详情
-        </Link>
-        <Link to="/" className="back home-jump">
-          首页
+        <Link to="/" className="back">
+          ← 返回首页
         </Link>
         <p className="msg error">{error}</p>
       </div>
@@ -234,17 +245,14 @@ export default function Analysis() {
 
   return (
     <div className="page analysis">
-      <Link to={`/stock/${symbol}`} className="back">
-        ← 返回详情
-      </Link>
-      <Link to="/" className="back home-jump">
-        首页
+      <Link to="/" className="back">
+        ← 返回首页
       </Link>
 
       <header className="detail-head visual-head analysis-head">
         <div className="analysis-head-main">
-          <p className="sym-lg">{quote?.symbol}</p>
-          <h1>{quote?.name} · 详细分析</h1>
+          <p className="sym-lg">{liveQuote?.symbol || quote?.symbol}</p>
+          <h1>{liveQuote?.name || quote?.name} · 详细分析</h1>
           <div className="analysis-head-actions">
             <button
               type="button"
@@ -276,27 +284,84 @@ export default function Analysis() {
             >
               财报分析
             </button>
+            <button
+              type="button"
+              className="btn-forecast btn-forecast-long"
+              onClick={() => {
+                setAiKind('forecast')
+                setForecastSide('long')
+                setForecastEntry('choose')
+                setAiOpen(true)
+              }}
+            >
+              做多预测
+            </button>
+            <button
+              type="button"
+              className="btn-forecast btn-forecast-short"
+              onClick={() => {
+                setAiKind('forecast')
+                setForecastSide('short')
+                setForecastEntry('choose')
+                setAiOpen(true)
+              }}
+            >
+              做空预测
+            </button>
+            <button
+              type="button"
+              className="btn-forecast btn-forecast-position"
+              onClick={() => {
+                setAiKind('forecast')
+                setForecastSide('long')
+                setForecastEntry('position')
+                setAiOpen(true)
+              }}
+            >
+              持仓建议
+            </button>
             <button type="button" className="btn-history" onClick={() => setHistoryOpen(true)}>
               历史分析
             </button>
           </div>
         </div>
         <div className="price-block">
-          <p className="price-lg">{formatPrice(quote?.price)}</p>
-          <p className={`chg ${changeClass(quote?.change_pct)}`}>{formatPct(quote?.change_pct)}</p>
+          <p className="price-lg">
+            {formatPrice(liveQuote?.price ?? quote?.price)}
+            {(liveQuote?.market_session_label || quote?.market_session_label) && (
+              <span className="session-badge inline">
+                {liveQuote?.market_session_label || quote?.market_session_label}
+              </span>
+            )}
+          </p>
+          <p className={`chg ${changeClass(liveQuote?.change_pct ?? quote?.change_pct)}`}>
+            {formatPct(liveQuote?.change_pct ?? quote?.change_pct)}
+          </p>
           {quote?.sparkline && quote.sparkline.length > 1 && (
             <Sparkline values={quote.sparkline} width={200} height={56} />
           )}
         </div>
       </header>
 
-      <AiAnalysisModal
-        open={aiOpen}
-        onClose={() => setAiOpen(false)}
-        symbol={(quote?.symbol || symbol).toUpperCase()}
-        name={quote?.name}
-        kind={aiKind}
+      <SessionPrices
+        price={liveQuote?.price ?? quote?.price}
+        prevClose={liveQuote?.prev_close ?? quote?.prev_close}
+        marketSessionLabel={liveQuote?.market_session_label ?? quote?.market_session_label}
+        asOf={liveQuote?.as_of ?? quote?.as_of}
       />
+
+      {aiOpen && (
+        <AiAnalysisModal
+          open={aiOpen}
+          onClose={() => setAiOpen(false)}
+          symbol={(quote?.symbol || symbol).toUpperCase()}
+          name={quote?.name}
+          kind={aiKind}
+          side={forecastSide}
+          lastPrice={liveQuote?.price ?? quote?.price}
+          forecastEntry={forecastEntry}
+        />
+      )}
 
       <AiHistoryModal
         open={historyOpen}
@@ -719,27 +784,36 @@ export default function Analysis() {
 
       <section className="section">
         <h2>全部技术指标</h2>
-        <div className="signal-grid">
-          {indicators.map((ind) => (
-            <article key={ind.key} className={`signal-card bias-${ind.bias}`}>
-              <div className="ind-top">
-                <span className="ind-name">{ind.name}</span>
-                <span className={`bias-chip bias-${ind.bias}`}>{ind.bias}</span>
-              </div>
-              <p className="ind-val-line">{formatValue(ind.value)}</p>
-              <p className="ind-extra">{ind.note}</p>
-              <div className="score-bar" aria-hidden>
-                <span
-                  className={`score-fill score-${ind.score}`}
-                  style={{
-                    width: ind.score === 0 ? '50%' : '100%',
-                    marginLeft: ind.score < 0 ? 0 : ind.score === 0 ? '25%' : undefined,
-                  }}
-                />
-              </div>
-            </article>
-          ))}
-        </div>
+        {levels?.data_thin || levels?.note ? (
+          <p className="msg muted">
+            新股/短样本：部分长周期指标（如 MA50/MA200）暂不可用，已算部分照常显示。
+          </p>
+        ) : null}
+        {indicators.length === 0 ? (
+          <p className="msg muted">日线过短，暂无可评分技术指标。</p>
+        ) : (
+          <div className="signal-grid">
+            {indicators.map((ind) => (
+              <article key={ind.key} className={`signal-card bias-${ind.bias}`}>
+                <div className="ind-top">
+                  <span className="ind-name">{ind.name}</span>
+                  <span className={`bias-chip bias-${ind.bias}`}>{ind.bias}</span>
+                </div>
+                <p className="ind-val-line">{formatValue(ind.value)}</p>
+                <p className="ind-extra">{ind.note}</p>
+                <div className="score-bar" aria-hidden>
+                  <span
+                    className={`score-fill score-${ind.score}`}
+                    style={{
+                      width: ind.score === 0 ? '50%' : '100%',
+                      marginLeft: ind.score < 0 ? 0 : ind.score === 0 ? '25%' : undefined,
+                    }}
+                  />
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
       {disclaimer && <p className="disclaimer">{disclaimer}</p>}

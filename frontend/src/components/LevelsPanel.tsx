@@ -38,12 +38,20 @@ function LevelCell({
 }
 
 export default function LevelsPanel({ levels, tradePlan, isBuy }: Props) {
+  const unavailable = levels.available === false
   return (
     <section className="section levels-section">
       <h2>支撑 / 压力位</h2>
-      <p className="msg muted">
-        {levels.legend?.weak}；{levels.legend?.strong}
-      </p>
+      {levels.note ? (
+        <p className="msg muted">{levels.note}</p>
+      ) : (
+        <p className="msg muted">
+          {levels.legend?.weak}；{levels.legend?.strong}
+        </p>
+      )}
+      {unavailable ? (
+        <p className="msg muted">可算指标与 AI 功能仍可用；样本充足后再显示结构位。</p>
+      ) : null}
       <div className="levels-grid">
         <article className="level-card">
           <h3>短期</h3>

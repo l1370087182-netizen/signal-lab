@@ -5,14 +5,24 @@ import type { ScreenerItem } from '../api/client'
 import NewTabLink from '../components/NewTabLink'
 import Sparkline from '../components/Sparkline'
 import useDocumentTitle from '../hooks/useDocumentTitle'
+import useInViewSymbols from '../hooks/useInViewSymbols'
+import useLiveQuotes, { withLivePrice } from '../hooks/useLiveQuotes'
 import { changeClass, formatPct, formatPrice } from '../utils/format'
 
 type ActionFilter = '买入' | '卖出'
 type StrengthFilter = '' | '强烈' | '谨慎'
+type SortOrder = 'asc' | 'desc'
 
 function signalLabel(action: string, strength: string | null) {
   if (action === '观望' || !strength) return action
   return `${action} · ${strength}`
+}
+
+function gradeTone(grade: number): string {
+  if (grade >= 80) return 'high'
+  if (grade >= 65) return 'good'
+  if (grade >= 50) return 'mid'
+  return 'low'
 }
 
 export default function Screener() {
@@ -20,6 +30,7 @@ export default function Screener() {
   const action = (params.get('action') as ActionFilter) || '买入'
   const strength = (params.get('strength') as StrengthFilter) || ''
   const page = Math.max(1, Number(params.get('page') || 1))
+  const order = ((params.get('order') as SortOrder) || 'desc') === 'asc' ? 'asc' : 'desc'
 
   useDocumentTitle(`${action}信号筛选`)
 
@@ -28,6 +39,8 @@ export default function Screener() {
   const [totalPages, setTotalPages] = useState(1)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const { visibleSymbols, observe } = useInViewSymbols()
+  const liveQuotes = useLiveQuotes(visibleSymbols, { enabled: !loading && items.length > 0 })
 
   useEffect(() => {
     let cancelled = false
@@ -40,6 +53,8 @@ export default function Screener() {
           strength: strength || undefined,
           page,
           page_size: 20,
+          sort_by: 'grade',
+          order,
         })
         if (cancelled) return
         setItems(data.items)
@@ -58,15 +73,21 @@ export default function Screener() {
     return () => {
       cancelled = true
     }
-  }, [action, strength, page])
+  }, [action, strength, page, order])
 
-  function update(next: { action?: ActionFilter; strength?: StrengthFilter; page?: number }) {
+  function update(next: {
+    action?: ActionFilter
+    strength?: StrengthFilter
+    page?: number
+    order?: SortOrder
+  }) {
     const p = new URLSearchParams(params)
     if (next.action) p.set('action', next.action)
     if (next.strength !== undefined) {
       if (next.strength) p.set('strength', next.strength)
       else p.delete('strength')
     }
+    if (next.order) p.set('order', next.order)
     p.set('page', String(next.page ?? 1))
     setParams(p)
   }
@@ -80,7 +101,10 @@ export default function Screener() {
       <header className="section">
         <p className="brand">SIGNAL LAB</p>
         <h1>买卖信号筛选</h1>
-        <p className="lead">按买入/卖出筛选，并按强度排名。每页 20 只；观望不参与榜单。</p>
+        <p className="lead">
+          股票池随 Futu 美股热度动态更新（并入自选与近期分析），再按买入/卖出筛选；
+          综合技术与舆情打分 0–100（谨慎约 38–64，强烈约 68–96），可升序/降序。每页 20 只。
+        </p>
       </header>
 
       <div className="filter-bar">
@@ -125,6 +149,23 @@ export default function Screener() {
             谨慎
           </button>
         </div>
+        <div className="filter-group">
+          <span className="filter-label">评分排序</span>
+          <button
+            type="button"
+            className={order === 'desc' ? 'chip active' : 'chip'}
+            onClick={() => update({ order: 'desc', page: 1 })}
+          >
+            从高到低
+          </button>
+          <button
+            type="button"
+            className={order === 'asc' ? 'chip active' : 'chip'}
+            onClick={() => update({ order: 'asc', page: 1 })}
+          >
+            从低到高
+          </button>
+        </div>
       </div>
 
       {error && <p className="msg error">{error}</p>}
@@ -138,44 +179,59 @@ export default function Screener() {
       ) : (
         <>
           <p className="msg muted">
-            共 {total} 只 · 第 {page}/{totalPages} 页
+            共 {total} 只 · 第 {page}/{totalPages} 页 · 按评分
+            {order === 'desc' ? '降序' : '升序'}
           </p>
           <ol className="screener-list">
-            {items.map((item) => (
-              <li key={item.symbol} className={`screener-row action-${item.action}`}>
-                <span className="rank">#{item.rank}</span>
-                <NewTabLink to={`/stock/${item.symbol}`} className="screener-main">
-                  <div className="screener-top">
-                    <span className="sym">{item.symbol}</span>
-                    <span className={`signal-tag ${item.action === '买入' ? 'buy' : 'sell'}`}>
-                      {signalLabel(item.action, item.strength)}
-                    </span>
+            {items.map((item) => {
+              const live = withLivePrice(item, liveQuotes)
+              const grade = Math.max(0, Math.min(100, Math.round(item.grade ?? 0)))
+              return (
+                <li
+                  key={item.symbol}
+                  className={`screener-row action-${item.action}`}
+                  ref={observe(item.symbol)}
+                >
+                  <span className="rank">#{item.rank}</span>
+                  <div className={`screener-grade tone-${gradeTone(grade)}`} title="综合评分 0–100">
+                    <strong>{grade}</strong>
+                    <span>分</span>
                   </div>
-                  <p className="name">{item.name}</p>
-                  {item.keywords && item.keywords.length > 0 && (
-                    <div className="keyword-row compact">
-                      {item.keywords.slice(0, 4).map((k) => (
-                        <span key={k} className="keyword-chip">
-                          {k}
-                        </span>
-                      ))}
+                  <NewTabLink to={`/stock/${item.symbol}/analysis`} className="screener-main">
+                    <div className="screener-top">
+                      <span className="sym">{item.symbol}</span>
+                      <span className={`signal-tag ${item.action === '买入' ? 'buy' : 'sell'}`}>
+                        {signalLabel(item.action, item.strength)}
+                      </span>
                     </div>
-                  )}
-                  <div className="screener-meta">
-                    <span className="price">{formatPrice(item.price)}</span>
-                    <span className={`chg ${changeClass(item.change_pct)}`}>
-                      {formatPct(item.change_pct)}
-                    </span>
-                    {item.sparkline && item.sparkline.length > 1 && (
-                      <Sparkline values={item.sparkline} width={100} height={32} />
+                    <p className="name">{item.name}</p>
+                    {item.keywords && item.keywords.length > 0 && (
+                      <div className="keyword-row compact">
+                        {item.keywords.slice(0, 4).map((k) => (
+                          <span key={k} className="keyword-chip">
+                            {k}
+                          </span>
+                        ))}
+                      </div>
                     )}
-                  </div>
-                </NewTabLink>
-                <NewTabLink className="text-btn" to={`/stock/${item.symbol}/analysis`}>
-                  分析
-                </NewTabLink>
-              </li>
-            ))}
+                    <div className="screener-meta">
+                      <span className="price">
+                        {formatPrice(live.price)}
+                        {live.market_session_label ? (
+                          <span className="session-badge inline">{live.market_session_label}</span>
+                        ) : null}
+                      </span>
+                      <span className={`chg ${changeClass(live.change_pct)}`}>
+                        {formatPct(live.change_pct)}
+                      </span>
+                      {item.sparkline && item.sparkline.length > 1 && (
+                        <Sparkline values={item.sparkline} width={100} height={32} />
+                      )}
+                    </div>
+                  </NewTabLink>
+                </li>
+              )
+            })}
           </ol>
 
           <div className="pager">

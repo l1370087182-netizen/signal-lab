@@ -4,6 +4,8 @@ import { api } from '../api/client'
 import type { SectorDetail, SectorHolding } from '../api/client'
 import NewTabLink from '../components/NewTabLink'
 import useDocumentTitle from '../hooks/useDocumentTitle'
+import useInViewSymbols from '../hooks/useInViewSymbols'
+import useLiveQuotes, { withLivePrice } from '../hooks/useLiveQuotes'
 import { changeClass, formatMarketCap, formatPct, formatPrice } from '../utils/format'
 
 type SortKey = 'market_cap' | 'price' | 'change_pct' | 'ytd_pct'
@@ -82,6 +84,9 @@ export default function SectorDetailPage() {
     return items
   }, [data, sortKey, sortDir])
 
+  const { visibleSymbols, observe } = useInViewSymbols()
+  const liveQuotes = useLiveQuotes(visibleSymbols)
+
   if (loading) {
     return (
       <div className="page">
@@ -159,10 +164,12 @@ export default function SectorDetailPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => (
-                <tr key={row.symbol}>
+              {rows.map((row) => {
+                const live = withLivePrice(row, liveQuotes)
+                return (
+                <tr key={row.symbol} ref={observe(row.symbol)}>
                   <td>
-                    <NewTabLink className="sym" to={`/stock/${row.symbol}`}>
+                    <NewTabLink className="sym" to={`/stock/${row.symbol}/analysis`}>
                       {row.symbol}
                     </NewTabLink>
                   </td>
@@ -170,16 +177,22 @@ export default function SectorDetailPage() {
                   <td>
                     {row.weight != null ? `${row.weight.toFixed(2)}%` : '—'}
                   </td>
-                  <td>{formatMarketCap(row.market_cap)}</td>
-                  <td>{formatPrice(row.price)}</td>
-                  <td className={`chg ${changeClass(row.change_pct)}`}>
-                    {formatPct(row.change_pct)}
+                  <td>{formatMarketCap(live.market_cap)}</td>
+                  <td>
+                    {formatPrice(live.price)}
+                    {live.market_session_label ? (
+                      <span className="session-badge inline">{live.market_session_label}</span>
+                    ) : null}
+                  </td>
+                  <td className={`chg ${changeClass(live.change_pct)}`}>
+                    {formatPct(live.change_pct)}
                   </td>
                   <td className={`chg ${changeClass(row.ytd_pct)}`}>
                     {formatPct(row.ytd_pct)}
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>

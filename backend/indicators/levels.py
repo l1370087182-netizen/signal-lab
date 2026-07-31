@@ -249,19 +249,75 @@ def _build_horizon(
     }
 
 
-def compute_levels(df: pd.DataFrame, raw: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Compute short/long weak & strong support and resistance."""
-    if df is None or len(df) < 40:
-        raise ValueError("历史数据不足，无法计算支撑压力位")
+def _empty_band(horizon: str, basis: str) -> dict[str, Any]:
+    return {
+        "horizon": horizon,
+        "basis": basis,
+        "available": False,
+        "support": {"weak": None, "strong": None, "primary": None},
+        "resistance": {"weak": None, "strong": None, "primary": None},
+        "support_price": None,
+        "resistance_price": None,
+    }
 
+
+def compute_levels(df: pd.DataFrame, raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Compute short/long weak & strong support and resistance.
+
+    New / thin listings: mark unavailable or data_thin instead of raising —
+    callers can still show the rest of the analysis page.
+    """
     raw = raw or {}
+    legend = {
+        "weak": "弱：距现价最近的支撑/压力（短线更敏感）",
+        "strong": "强：更远的结构位（多次重叠、关键均线或阶段高低点），与弱位强制拉开",
+    }
+
+    if df is None or len(df) < 2:
+        price = float(raw["price"]) if raw.get("price") is not None else None
+        note = "暂无足够日线，无法估算支撑压力位"
+        return {
+            "price": _r(price) if price is not None else None,
+            "atr": None,
+            "available": False,
+            "data_thin": True,
+            "history_bars": 0 if df is None else len(df),
+            "note": note,
+            "short_term": _empty_band("短期（约1–2个月）", note),
+            "long_term": _empty_band("长期（约6–12个月）", note),
+            "legend": legend,
+        }
+
+    n = len(df)
     close = df["close"].astype(float)
     high = df["high"].astype(float)
     low = df["low"].astype(float)
     price = float(raw.get("price") or close.iloc[-1])
-    atr = float(raw.get("atr_14") or (high - low).tail(14).mean())
+    atr = float(raw.get("atr_14") or (high - low).tail(min(14, n)).mean() or 0)
     if atr <= 0:
         atr = price * 0.02
+
+    # Too few bars for meaningful swings — mark and exit without blocking callers
+    if n < 5:
+        note = f"上市仅 {n} 个交易日，历史过短，暂无法估算支撑压力位"
+        return {
+            "price": _r(price),
+            "atr": _r(atr, 4),
+            "available": False,
+            "data_thin": True,
+            "history_bars": n,
+            "note": note,
+            "short_term": _empty_band("短期（约1–2个月）", note),
+            "long_term": _empty_band("长期（约6–12个月）", note),
+            "legend": legend,
+        }
+
+    data_thin = n < 40
+    thin_note = (
+        f"上市仅约 {n} 个交易日，支撑/压力为短样本估算，长期结构参考性有限"
+        if data_thin
+        else None
+    )
 
     bb_u = raw.get("bb_upper")
     bb_l = raw.get("bb_lower")
@@ -269,23 +325,29 @@ def compute_levels(df: pd.DataFrame, raw: dict[str, Any] | None = None) -> dict[
     ma50 = raw.get("ma50")
     ma200 = raw.get("ma200")
 
+    short_window = min(55, n)
+    short_order = 2 if n >= 15 else 1
     short = _build_horizon(
         df,
         price,
         atr,
-        window=55,
-        swing_order=2,
+        window=short_window,
+        swing_order=short_order,
         tol=0.008,
         horizon_key="short",
         horizon="短期（约1–2个月）",
-        basis="近2个月摆动点；弱=最近触碰，强=更远的重叠区/均线（强制与弱位拉开）",
+        basis=(
+            thin_note
+            or "近2个月摆动点；弱=最近触碰，强=更远的重叠区/均线（强制与弱位拉开）"
+        ),
         strong_extras_res=[(float(ma20), 1.8)] if ma20 and ma20 > price else [],
         strong_extras_sup=[(float(ma20), 1.8)] if ma20 and ma20 < price else [],
         weak_extras_res=[(float(bb_u), 0.9)] if bb_u and bb_u > price else [],
         weak_extras_sup=[(float(bb_l), 0.9)] if bb_l and bb_l < price else [],
     )
+    short["available"] = True
 
-    long_window = min(252, len(df)) if len(df) >= 120 else len(df)
+    long_window = min(252, n) if n >= 120 else n
     long_df = df.tail(long_window)
     high_52 = float(long_df["high"].max())
     low_52 = float(long_df["low"].min())
@@ -303,33 +365,39 @@ def compute_levels(df: pd.DataFrame, raw: dict[str, Any] | None = None) -> dict[
         else:
             long_strong_sup.append((float(ma200), 2.6))
 
+    long_order = 5 if n >= 60 else (3 if n >= 25 else 1)
     long = _build_horizon(
         df,
         price,
         atr,
         window=long_window,
-        swing_order=5,
+        swing_order=long_order,
         tol=0.012,
         horizon_key="long",
-        horizon="长期（约6–12个月）",
-        basis="近一年摆动点；弱=次级结构，强=区间极值或 MA50/MA200（与短期拉开）",
+        horizon="长期（约6–12个月）" if n >= 120 else f"阶段结构（约 {n} 个交易日）",
+        basis=(
+            thin_note
+            or "近一年摆动点；弱=次级结构，强=区间极值或 MA50/MA200（与短期拉开）"
+        ),
         strong_extras_res=long_strong_res,
         strong_extras_sup=long_strong_sup,
         weak_extras_res=[(float(ma50), 1.0)] if ma50 and ma50 > price else [],
         weak_extras_sup=[(float(ma50), 1.0)] if ma50 and ma50 < price else [],
     )
+    long["available"] = True
 
     short, long = _dedupe_horizons(short, long, price, atr)
 
     return {
         "price": _r(price),
         "atr": _r(atr, 4),
+        "available": True,
+        "data_thin": data_thin,
+        "history_bars": n,
+        "note": thin_note,
         "short_term": short,
         "long_term": long,
-        "legend": {
-            "weak": "弱：距现价最近的支撑/压力（短线更敏感）",
-            "strong": "强：更远的结构位（多次重叠、关键均线或阶段高低点），与弱位强制拉开",
-        },
+        "legend": legend,
     }
 
 
@@ -355,6 +423,8 @@ def build_trade_plan(
 ) -> dict[str, Any] | None:
     """For 买入: pullback entry, tight stop under weak support, TP with usable RR."""
     if action != "买入":
+        return None
+    if not levels or levels.get("available") is False or levels.get("price") is None:
         return None
 
     price = float(levels["price"])
@@ -384,31 +454,33 @@ def build_trade_plan(
 
     entry_ref = (float(entry_low) + float(entry_high)) / 2.0
 
-    # Stop: under weak support + small buffer (old logic used strong + 0.8 ATR → chronically bad RR)
+    # Stop: under weak support + noise buffer (avoid exact-level wick sweeps)
     stop_ref = short_weak_sup or short_strong_sup or (entry_ref - 1.0 * atr)
-    buffer = 0.3 * atr if strength == "强烈" else 0.4 * atr
+    buffer = 0.45 * atr if strength == "强烈" else 0.55 * atr
     stop_loss = float(stop_ref) - buffer
     # Cap risk so stop isn't absurdly far from planned entry
-    max_risk = 1.15 * atr if strength == "强烈" else 1.35 * atr
+    max_risk = 1.25 * atr if strength == "强烈" else 1.45 * atr
     if entry_ref - stop_loss > max_risk:
         stop_loss = entry_ref - max_risk
     # Must stay below entry
     if stop_loss >= entry_ref:
-        stop_loss = entry_ref - 0.6 * atr
+        stop_loss = entry_ref - 0.7 * atr
     stop_loss = _r(stop_loss)
 
-    # TP: structure first; ATR only when near resistance can't clear min RR
+    # TP: structure first, but pull slightly before resistance so fills happen
+    # before a near-miss rejection at the exact level.
     min_rr = 1.2
+    tp_pull = 0.22 * atr if strength == "强烈" else 0.3 * atr
     structure: list[tuple[float, str]] = []
     for p, label in (
-        (short_weak_res, "短线弱压力"),
-        (short_strong_res, "短线强压力"),
-        (long_weak_res, "长期弱压力"),
-        (long_strong_res, "长期强压力"),
+        (short_weak_res, "短线弱压力前"),
+        (short_strong_res, "短线强压力前"),
+        (long_weak_res, "长期弱压力前"),
+        (long_strong_res, "长期强压力前"),
     ):
         if p is None:
             continue
-        tp_v = float(p)
+        tp_v = float(p) - tp_pull
         if tp_v <= entry_ref * 1.003:
             continue
         structure.append((tp_v, label))
@@ -456,10 +528,11 @@ def build_trade_plan(
         notes.append("按回踩入场计，TP1 风险收益较合理")
     elif rr1 is not None and rr1 < 1.0:
         notes.append("即便回踩入场，TP1 性价比仍偏弱，可优先看 TP2 或观望")
+    notes.append("止损在支撑下方留噪音缓冲；止盈略低于压力，降低精准扫损与差一点止盈")
 
     entry_note = "回踩弱支撑附近买入（按此区间计风险收益）"
-    stop_note = "跌破弱支撑加小幅缓冲止损（不再默认挂在更远的强支撑）"
-    tp_note = f"TP1：{tp1_label}；TP2：{tp2_label}"
+    stop_note = "跌破弱支撑后再加噪音缓冲止损（防影线精准扫损，不贴死支撑）"
+    tp_note = f"TP1：{tp1_label}；TP2：{tp2_label}（均略低于关口以利成交）"
 
     return {
         "action": "买入",

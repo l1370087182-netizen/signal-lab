@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 from urllib.parse import urljoin
@@ -20,8 +19,10 @@ except Exception:  # noqa: BLE001
 import requests
 from bs4 import BeautifulSoup
 
-_SCORE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+from data.ttl_cache import TtlCache
+
 _CACHE_TTL = 180
+_SCORE_CACHE: TtlCache[str, dict[str, Any]] = TtlCache(maxsize=128, default_ttl=_CACHE_TTL)
 
 _SESSION = requests.Session()
 _SESSION.trust_env = False
@@ -70,18 +71,11 @@ _SENT_SPLIT = re.compile(r"[。！？；;\n]+|(?<=[.!?])\s+")
 
 
 def _cache_get(symbol: str) -> dict[str, Any] | None:
-    item = _SCORE_CACHE.get(symbol)
-    if not item:
-        return None
-    expires, value = item
-    if time.time() > expires:
-        _SCORE_CACHE.pop(symbol, None)
-        return None
-    return value
+    return _SCORE_CACHE.get(symbol)
 
 
 def _cache_set(symbol: str, value: dict[str, Any]) -> None:
-    _SCORE_CACHE[symbol] = (time.time() + _CACHE_TTL, value)
+    _SCORE_CACHE.set(symbol, value)
 
 
 def _clause_has_negation(clause: str, keyword: str) -> bool:
@@ -307,9 +301,8 @@ def analyze_news_sentiment(symbol: str, *, light: bool = False) -> dict[str, Any
         if full is not None:
             return dict(full)
 
-    items = _list_eastmoney_items(symbol, limit=6 if light else 8) + _list_yahoo_items(
-        symbol, limit=3 if light else 4
-    )
+    # Unified news: Eastmoney only (no Yahoo RSS mix)
+    items = _list_eastmoney_items(symbol, limit=8 if light else 10)
     bull = 0.0
     bear = 0.0
     hit_words: list[str] = []
@@ -376,7 +369,7 @@ def analyze_news_sentiment(symbol: str, *, light: bool = False) -> dict[str, Any
         "intensity": round(intensity, 3),
         "coverage": round(coverage, 3),
         "keywords": hit_words[:12],
-        "source": "eastmoney-full+yahoo" if not light else "title+snippet",
+        "source": "eastmoney-full" if not light else "eastmoney-light",
         "mode": "fulltext+context" if not light else "light",
         "persisted": False,
     }

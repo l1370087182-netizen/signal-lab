@@ -14,11 +14,12 @@ import requests
 
 from data.fear_index import _SECTOR_META
 from data.market_client import fetch_history, fetch_quote, fetch_quotes_batch
+from data.ttl_cache import TtlCache
 
 _CACHE_DIR = Path(__file__).resolve().parent / "cache" / "sector"
 _HOLDINGS_TTL = 24 * 3600
 _DETAIL_TTL = 300
-_MEM: dict[str, tuple[float, dict[str, Any]]] = {}
+_MEM: TtlCache[str, dict[str, Any]] = TtlCache(maxsize=32, default_ttl=_DETAIL_TTL)
 
 _UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -184,11 +185,10 @@ def get_sector_detail(symbol: str, *, force: bool = False) -> dict[str, Any]:
     if not meta:
         raise ValueError(f"未知板块代码：{symbol}")
 
-    now = time.time()
     if not force:
         mem = _MEM.get(symbol)
-        if mem and now < mem[0]:
-            return dict(mem[1])
+        if mem is not None:
+            return dict(mem)
 
     holdings = get_holdings(symbol, force=force)
     tickers = [h["symbol"] for h in holdings]
@@ -246,5 +246,5 @@ def get_sector_detail(symbol: str, *, force: bool = False) -> dict[str, Any]:
         "source": "ssga-holdings+eastmoney",
         "updated": date.today().isoformat(),
     }
-    _MEM[symbol] = (now + _DETAIL_TTL, payload)
+    _MEM.set(symbol, payload)
     return dict(payload)

@@ -1,7 +1,6 @@
 """Near-1y US earnings analysis via Eastmoney (akshare), in-memory cache only."""
 from __future__ import annotations
 
-import time
 from typing import Any
 
 import pandas as pd
@@ -11,26 +10,21 @@ try:
 except Exception:  # noqa: BLE001
     ak = None
 
-_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+from data.ttl_cache import TtlCache
+
 _TTL = 3600
+_CACHE: TtlCache[str, dict[str, Any]] = TtlCache(maxsize=128, default_ttl=_TTL)
 
 _OCF_NAME = "经营活动产生的现金流量净额"
 _CAPEX_NAME = "购买固定资产"
 
 
 def _cache_get(symbol: str) -> dict[str, Any] | None:
-    item = _CACHE.get(symbol)
-    if not item:
-        return None
-    expires, value = item
-    if time.time() > expires:
-        _CACHE.pop(symbol, None)
-        return None
-    return value
+    return _CACHE.get(symbol)
 
 
 def _cache_set(symbol: str, value: dict[str, Any]) -> None:
-    _CACHE[symbol] = (time.time() + _TTL, value)
+    _CACHE.set(symbol, value)
 
 
 def clear_earnings_cache() -> None:

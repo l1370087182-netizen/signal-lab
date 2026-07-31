@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api/client'
 import type { FearIndex, SearchResult, WatchGroup, WatchlistItem } from '../api/client'
 import NewTabLink from '../components/NewTabLink'
+import MajorEventsModal from '../components/MajorEventsModal'
 import Sparkline from '../components/Sparkline'
 import useDocumentTitle from '../hooks/useDocumentTitle'
+import useInViewSymbols from '../hooks/useInViewSymbols'
+import useLiveQuotes, { withLivePrice } from '../hooks/useLiveQuotes'
 import { changeClass, formatPct, formatPrice } from '../utils/format'
 
 export default function Home() {
@@ -13,12 +17,14 @@ export default function Home() {
   const [results, setResults] = useState<SearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState('')
+  const searchSeq = useRef(0)
   const [groups, setGroups] = useState<WatchGroup[]>([])
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([])
   const [activeGroupId, setActiveGroupId] = useState<number | 'all'>('all')
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [newGroupName, setNewGroupName] = useState('')
   const [creatingGroup, setCreatingGroup] = useState(false)
+  const [createGroupError, setCreateGroupError] = useState('')
   const [renamingId, setRenamingId] = useState<number | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [addQuery, setAddQuery] = useState('')
@@ -30,6 +36,7 @@ export default function Home() {
   const [fear, setFear] = useState<FearIndex | null>(null)
   const [fearError, setFearError] = useState('')
   const [loadingFear, setLoadingFear] = useState(true)
+  const [majorEventsOpen, setMajorEventsOpen] = useState(false)
 
   const loadWatchlist = useCallback(async () => {
     setLoadingWatch(true)
@@ -37,7 +44,34 @@ export default function Home() {
     try {
       const data = await api.watchlist()
       setGroups(data.groups || [])
-      setWatchlist(data.items || [])
+      let items = data.items || []
+      // Seed prices immediately so cards aren't blank while live poll starts
+      const syms = items.map((i) => i.symbol).filter(Boolean)
+      if (syms.length) {
+        try {
+          const batch = await api.quotesBatch(syms)
+          const qmap = batch.quotes || {}
+          items = items.map((it) => {
+            const q = qmap[it.symbol.toUpperCase()]
+            if (!q || q.price == null) return it
+            return {
+              ...it,
+              price: q.price,
+              change: q.change ?? it.change,
+              change_pct: q.change_pct ?? it.change_pct,
+              market_cap: q.market_cap ?? it.market_cap,
+              prev_close: q.prev_close ?? it.prev_close,
+              market_session: q.market_session ?? it.market_session,
+              market_session_label: q.market_session_label ?? it.market_session_label,
+              as_of: q.as_of ?? it.as_of,
+              data_source: q.data_source ?? it.data_source,
+            }
+          })
+        } catch {
+          /* live poll will retry */
+        }
+      }
+      setWatchlist(items)
     } catch (e) {
       setWatchError(e instanceof Error ? e.message : '加载自选失败')
     } finally {
@@ -45,13 +79,14 @@ export default function Home() {
     }
   }, [])
 
-  const loadFear = useCallback(async () => {
+  const loadFear = useCallback(async (force = false) => {
     setLoadingFear(true)
     setFearError('')
     try {
-      const data = await api.fearIndex()
+      const data = await api.fearIndex(force)
       setFear(data)
     } catch (e) {
+      // Keep last good panel; only show error when nothing to display.
       setFearError(e instanceof Error ? e.message : '恐慌指数加载失败')
     } finally {
       setLoadingFear(false)
@@ -63,38 +98,64 @@ export default function Home() {
     void loadFear()
   }, [loadWatchlist, loadFear])
 
-  async function onSearch(e: FormEvent) {
-    e.preventDefault()
+  // Live search as you type (debounced); abort stale requests
+  useEffect(() => {
     const q = query.trim()
-    if (!q) return
+    if (q.length < 1) {
+      setResults([])
+      setSearching(false)
+      setSearchError('')
+      return
+    }
+    const seq = ++searchSeq.current
+    const ac = new AbortController()
     setSearching(true)
     setSearchError('')
-    try {
-      const data = await api.search(q)
-      setResults(data.results)
-      if (!data.results.length) setSearchError('未找到匹配股票')
-    } catch (err) {
-      setResults([])
-      setSearchError(err instanceof Error ? err.message : '搜索失败')
-    } finally {
-      setSearching(false)
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const data = await api.search(q, 12, ac.signal)
+          if (seq !== searchSeq.current) return
+          setResults(data.results || [])
+          setSearchError(data.results?.length ? '' : '未找到匹配股票')
+        } catch (err) {
+          if (ac.signal.aborted || seq !== searchSeq.current) return
+          setResults([])
+          setSearchError(err instanceof Error ? err.message : '搜索失败')
+        } finally {
+          if (seq === searchSeq.current) setSearching(false)
+        }
+      })()
+    }, 280)
+    return () => {
+      window.clearTimeout(timer)
+      ac.abort()
     }
-  }
+  }, [query])
 
   async function createGroup(e: FormEvent) {
     e.preventDefault()
     const name = newGroupName.trim()
     if (!name) return
     setCreatingGroup(true)
+    setCreateGroupError('')
     setWatchError('')
     try {
       const res = await api.createWatchGroup(name)
       setNewGroupName('')
       setShowCreateModal(false)
-      await loadWatchlist()
+      // Prefer lightweight refresh; fall back to full watchlist
+      try {
+        const g = await api.watchlistGroups()
+        setGroups(g.groups || [])
+      } catch {
+        await loadWatchlist()
+      }
       if (res.group?.id) setActiveGroupId(res.group.id)
     } catch (err) {
-      setWatchError(err instanceof Error ? err.message : '创建分组失败')
+      const msg = err instanceof Error ? err.message : '创建分组失败'
+      setCreateGroupError(msg)
+      setWatchError(msg)
     } finally {
       setCreatingGroup(false)
     }
@@ -116,10 +177,22 @@ export default function Home() {
   }
 
   async function deleteGroup(id: number) {
+    const target = groups.find((g) => g.id === id)
+    if (!window.confirm(`确定删除分组「${target?.name || id}」？组内股票会移到默认分组。`)) {
+      return
+    }
+    setWatchError('')
     try {
       await api.deleteWatchGroup(id)
       if (activeGroupId === id) setActiveGroupId('all')
-      await loadWatchlist()
+      try {
+        const g = await api.watchlistGroups()
+        setGroups(g.groups || [])
+        const data = await api.watchlist()
+        setWatchlist(data.items || [])
+      } catch {
+        await loadWatchlist()
+      }
     } catch (err) {
       setWatchError(err instanceof Error ? err.message : '删除分组失败')
     }
@@ -142,10 +215,11 @@ export default function Home() {
     }
   }
 
-  // Debounced fuzzy search for group add
+  // Debounced fuzzy search for group add (abort stale)
   useEffect(() => {
     if (typeof activeGroupId !== 'number') {
       setAddResults([])
+      setAddSearching(false)
       return
     }
     const q = addQuery.trim()
@@ -155,14 +229,15 @@ export default function Home() {
       return
     }
     let cancelled = false
+    const ac = new AbortController()
     setAddSearching(true)
     const timer = window.setTimeout(() => {
       void (async () => {
         try {
-          const data = await api.search(q, 12)
+          const data = await api.search(q, 12, ac.signal)
           if (!cancelled) setAddResults(data.results || [])
         } catch {
-          if (!cancelled) setAddResults([])
+          if (!cancelled && !ac.signal.aborted) setAddResults([])
         } finally {
           if (!cancelled) setAddSearching(false)
         }
@@ -171,6 +246,7 @@ export default function Home() {
     return () => {
       cancelled = true
       window.clearTimeout(timer)
+      ac.abort()
     }
   }, [addQuery, activeGroupId])
 
@@ -193,6 +269,14 @@ export default function Home() {
     return watchlist.filter((i) => i.group_id === activeGroupId)
   }, [watchlist, activeGroupId])
 
+  const { observe } = useInViewSymbols()
+  // Always refresh prices for currently listed symbols (don't rely only on IO).
+  const liveSymbols = useMemo(
+    () => visibleItems.map((i) => i.symbol),
+    [visibleItems],
+  )
+  const liveQuotes = useLiveQuotes(liveSymbols, { intervalMs: 3000 })
+
   const overall = fear?.overall
   const vix = fear?.vix
   const score = overall?.score
@@ -203,7 +287,7 @@ export default function Home() {
         <aside className="fear-rail fear-rail-left" aria-label="整体市场恐慌指数">
           <div className="section-head compact">
             <h2>市场恐慌</h2>
-            <button type="button" className="text-btn" onClick={() => void loadFear()}>
+            <button type="button" className="text-btn" onClick={() => void loadFear(true)}>
               刷新
             </button>
           </div>
@@ -218,10 +302,19 @@ export default function Home() {
                 <p className={`fear-grade tone-${overall?.grade?.tone || 'neutral'}`}>
                   评级：{overall?.grade?.label || '—'}
                 </p>
+                {overall?.score_change != null && (
+                  <p className={`chg tiny ${changeClass(overall.score_change)}`}>
+                    较{overall.prev_date || '昨'}{' '}
+                    {overall.score_change > 0 ? '+' : ''}
+                    {overall.score_change.toFixed(0)}
+                    {overall.prev_score != null ? `（前值 ${overall.prev_score.toFixed(0)}）` : ''}
+                  </p>
+                )}
                 <div className="fear-scale" aria-hidden>
                   <span style={{ left: `${Math.max(0, Math.min(100, score ?? 50))}%` }} />
                 </div>
                 <p className="msg muted tiny">{overall?.scale}</p>
+                {fear.as_of && <p className="msg muted tiny">更新于 {fear.as_of}</p>}
               </div>
               <div className={`fear-vix tone-${vix?.grade?.tone || 'neutral'}`}>
                 <p className="fear-meter-label">{vix?.label || 'VIX 恐慌指数'}</p>
@@ -230,8 +323,22 @@ export default function Home() {
                   评级：{vix?.grade?.label || '—'}
                 </p>
                 {vix?.change_pct != null && (
-                  <p className={`chg ${changeClass(vix.change_pct)}`}>{formatPct(vix.change_pct)}</p>
+                  <p className={`chg ${changeClass(vix.change_pct)}`}>
+                    较前收 {formatPct(vix.change_pct)}
+                    {vix.prev_close != null ? `（${vix.prev_close.toFixed(2)}）` : ''}
+                  </p>
                 )}
+                {vix?.change_pct_3d != null && (
+                  <p className={`chg tiny ${changeClass(vix.change_pct_3d)}`}>
+                    近3日 {formatPct(vix.change_pct_3d)}
+                  </p>
+                )}
+                {vix?.change_pct_5d != null && (
+                  <p className={`chg tiny ${changeClass(vix.change_pct_5d)}`}>
+                    近5日 {formatPct(vix.change_pct_5d)}
+                  </p>
+                )}
+                {vix?.as_of && <p className="msg muted tiny">VIX 收盘 {vix.as_of}</p>}
               </div>
               {fear.legend && fear.legend.length > 0 && (
                 <div className="fear-legend stacked">
@@ -245,7 +352,10 @@ export default function Home() {
                   ))}
                 </div>
               )}
-              {fear.stale && <p className="msg muted tiny">显示缓存数据</p>}
+              {fear.stale && <p className="msg muted tiny">显示缓存数据（源站暂不可用）</p>}
+              {fear.cached && !fear.stale && (
+                <p className="msg muted tiny">本地缓存 · 点刷新可强制更新</p>
+              )}
             </>
           ) : (
             <p className="msg muted">暂无数据</p>
@@ -261,30 +371,46 @@ export default function Home() {
             <p className="lead">
               搜索标的、收藏自选，用可视化仪表读出买卖强度——不做 K 线，只看指标信号。
             </p>
-            <form className="search-form" onSubmit={onSearch}>
+            <form
+              className="search-form"
+              onSubmit={(e) => {
+                e.preventDefault()
+              }}
+            >
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="输入代码或公司名，例如 AAPL / Nvidia"
                 aria-label="搜索股票"
                 autoFocus
+                autoComplete="off"
               />
-              <button type="submit" disabled={searching}>
-                {searching ? '搜索中…' : '搜索'}
-              </button>
+              <span className="search-status" aria-live="polite">
+                {searching ? '搜索中…' : query.trim() ? (results.length ? `${results.length} 条` : '') : ''}
+              </span>
             </form>
           </div>
           <div className="hero-panel">
             <div className="hero-orb" aria-hidden />
             <p className="hero-panel-label">快捷入口</p>
-            <NewTabLink className="hero-stat" to="/screener?action=买入">
-              <span>买入信号榜</span>
-              <strong>按强度排名</strong>
-            </NewTabLink>
-            <NewTabLink className="hero-stat delay" to="/screener?action=卖出">
-              <span>卖出信号榜</span>
-              <strong>筛选排行</strong>
-            </NewTabLink>
+            <div className="hero-stat-row">
+              <NewTabLink className="hero-stat" to="/screener?action=买入">
+                <span>买入信号</span>
+                <strong>强度榜</strong>
+              </NewTabLink>
+              <NewTabLink className="hero-stat delay" to="/screener?action=卖出">
+                <span>卖出信号</span>
+                <strong>筛选榜</strong>
+              </NewTabLink>
+              <button
+                type="button"
+                className="hero-stat delay2"
+                onClick={() => setMajorEventsOpen(true)}
+              >
+                <span>重大事件</span>
+                <strong>影响美股</strong>
+              </button>
+            </div>
           </div>
         </div>
       </header>
@@ -297,7 +423,7 @@ export default function Home() {
           <ul className="list cardish">
             {results.map((r) => (
               <li key={r.symbol}>
-                <NewTabLink to={`/stock/${r.symbol}`} className="row-link">
+                <NewTabLink to={`/stock/${r.symbol}/analysis`} className="row-link">
                   <span className="sym">{r.symbol}</span>
                   <span className="name">{r.name}</span>
                   <span className="meta">{r.exchange}</span>
@@ -397,6 +523,7 @@ export default function Home() {
             aria-label="新建分组"
             onClick={() => {
               setWatchError('')
+              setCreateGroupError('')
               setNewGroupName('')
               setShowCreateModal(true)
             }}
@@ -475,24 +602,31 @@ export default function Home() {
           </p>
         ) : (
           <ul className="watch-grid">
-            {visibleItems.map((item) => (
-              <li key={item.symbol} className="watch-card">
+            {visibleItems.map((item) => {
+              const live = withLivePrice(item, liveQuotes)
+              return (
+              <li key={item.symbol} className="watch-card" ref={observe(item.symbol)}>
                 <NewTabLink
-                  to={`/stock/${item.symbol}`}
+                  to={`/stock/${item.symbol}/analysis`}
                   className="watch-card-link"
                   onMouseEnter={() => {
-                    void api.stockSummary(item.symbol).catch(() => undefined)
+                    void api.analysis(item.symbol).catch(() => undefined)
                   }}
                 >
                   <div className="watch-card-top">
                     <span className="sym">{item.symbol}</span>
-                    <span className={`chg ${changeClass(item.change_pct)}`}>
-                      {formatPct(item.change_pct)}
+                    <span className={`chg ${changeClass(live.change_pct)}`}>
+                      {formatPct(live.change_pct)}
                     </span>
                   </div>
                   <p className="name">{item.name}</p>
                   <div className="watch-card-bottom">
-                    <p className="price">{formatPrice(item.price)}</p>
+                    <p className="price">
+                      {formatPrice(live.price)}
+                      {live.market_session_label ? (
+                        <span className="session-badge inline">{live.market_session_label}</span>
+                      ) : null}
+                    </p>
                     {item.sparkline && item.sparkline.length > 1 && (
                       <Sparkline values={item.sparkline} width={120} height={36} />
                     )}
@@ -507,63 +641,76 @@ export default function Home() {
                   ✕
                 </button>
               </li>
-            ))}
+              )
+            })}
           </ul>
         )}
       </section>
 
-      {showCreateModal && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onClick={() => {
-            if (!creatingGroup) setShowCreateModal(false)
-          }}
-        >
+      {showCreateModal &&
+        createPortal(
           <div
-            className="modal-card"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="create-group-title"
-            onClick={(e) => e.stopPropagation()}
+            className="modal-backdrop"
+            role="presentation"
+            onClick={() => {
+              if (!creatingGroup) setShowCreateModal(false)
+            }}
           >
-            <h3 id="create-group-title">新建分组</h3>
-            <form onSubmit={(e) => void createGroup(e)}>
-              <input
-                value={newGroupName}
-                onChange={(e) => setNewGroupName(e.target.value)}
-                placeholder="输入分组名称"
-                aria-label="分组名称"
-                maxLength={32}
-                autoFocus
-                disabled={creatingGroup}
-              />
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="text-btn"
+            <div
+              className="modal-card"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="create-group-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 id="create-group-title">新建分组</h3>
+              <form onSubmit={(e) => void createGroup(e)}>
+                <input
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  placeholder="输入分组名称"
+                  aria-label="分组名称"
+                  maxLength={32}
+                  autoFocus
                   disabled={creatingGroup}
-                  onClick={() => setShowCreateModal(false)}
-                >
-                  取消
-                </button>
-                <button type="submit" disabled={creatingGroup || !newGroupName.trim()}>
-                  {creatingGroup ? '创建中…' : '创建'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+                />
+                {createGroupError && <p className="msg error">{createGroupError}</p>}
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="text-btn"
+                    disabled={creatingGroup}
+                    onClick={() => setShowCreateModal(false)}
+                  >
+                    取消
+                  </button>
+                  <button type="submit" disabled={creatingGroup || !newGroupName.trim()}>
+                    {creatingGroup ? '创建中…' : '创建'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body,
+        )}
+
+      <MajorEventsModal open={majorEventsOpen} onClose={() => setMajorEventsOpen(false)} />
         </div>
 
         <aside className="fear-rail fear-rail-right" aria-label="各板块恐慌指数">
           <div className="section-head compact">
             <h2>板块恐慌</h2>
+            <button type="button" className="text-btn" onClick={() => void loadFear(true)}>
+              刷新
+            </button>
           </div>
           {loadingFear ? (
             <p className="msg">加载中…</p>
           ) : fear ? (
+            <>
+              {fear.sector_method && (
+                <p className="msg muted tiny">板块情绪按 ETF 实时涨跌推算，随行情变化</p>
+              )}
             <div className="fear-sectors rail">
               {(fear.sectors || []).map((sec) => (
                 <NewTabLink
@@ -580,9 +727,15 @@ export default function Home() {
                   </div>
                   <p className="fear-sector-score">{sec.score.toFixed(0)}</p>
                   <p className={`fear-grade tone-${sec.grade.tone}`}>{sec.grade.label}</p>
+                  {sec.score_change != null && sec.score_change !== 0 && (
+                    <p className={`chg tiny ${changeClass(sec.score_change)}`}>
+                      情绪 {sec.score_change > 0 ? '+' : ''}
+                      {sec.score_change.toFixed(0)}
+                    </p>
+                  )}
                   {sec.change_pct != null && (
                     <p className={`chg tiny ${changeClass(sec.change_pct)}`}>
-                      {formatPct(sec.change_pct)}
+                      今日 {formatPct(sec.change_pct)}
                     </p>
                   )}
                   <div className="fear-bar" aria-hidden>
@@ -592,6 +745,7 @@ export default function Home() {
                 </NewTabLink>
               ))}
             </div>
+            </>
           ) : (
             <p className="msg muted">暂无板块数据</p>
           )}

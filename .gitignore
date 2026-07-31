@@ -29,6 +29,7 @@ __pycache__/
 *.sqlite3
 backend/db/watchlist.db
 backend/data/cache/
+backend/data/.fear_state.json
 *.log
 
 # OS / IDE

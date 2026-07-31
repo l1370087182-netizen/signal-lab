@@ -1,5 +1,4 @@
 import { Link, useLocation } from 'react-router-dom'
-import NewTabLink from './NewTabLink'
 
 export default function SiteHeader() {
   const { pathname } = useLocation()
@@ -17,12 +16,12 @@ export default function SiteHeader() {
             ← 返回首页
           </Link>
         )}
-        <NewTabLink
+        <Link
           to="/screener?action=买入"
           className={pathname.startsWith('/screener') ? 'active' : ''}
         >
           信号筛选
-        </NewTabLink>
+        </Link>
       </nav>
     </header>
   )
